@@ -12,27 +12,19 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+type Host struct {
+	Host     string
+	IsLeader bool
+}
+
 type App struct {
 	totalRequests  prometheus.Counter
 	failedRequests prometheus.Counter
 	clusterMode    bool
-	hosts          []string
+	hosts          []Host
 	ready          bool
-}
-
-type CheckReady struct {
-	handler http.Handler
-	app     *App
-}
-
-func (cr *CheckReady) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// TODO: if there are no hosts and cluster mode is enabled, then reject request since we are not ready
-	if cr.app.clusterMode && len(cr.app.hosts) == 0 {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte("Not ready yet"))
-		return
-	}
-	cr.handler.ServeHTTP(w, r)
+	selfAddress    string
+	leaderHost     string
 }
 
 func CheckReadyMiddleware(handlerFunc http.HandlerFunc, app *App) http.HandlerFunc {
@@ -136,16 +128,6 @@ func ReadConfigFile() map[string]interface{} {
 }
 
 func setupCluster(a *App) {
-	http.HandleFunc("/leader", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			w.Write([]byte("Only POST is allowed"))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("This is the leader"))
-		setIamTheLeader()
-	})
 
 	http.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -155,7 +137,7 @@ func setupCluster(a *App) {
 		}
 		a.ready = true
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Join signal received"))
+		w.Write([]byte("Ready to serve requests"))
 	})
 
 	http.HandleFunc("/hosts", func(w http.ResponseWriter, r *http.Request) {
@@ -166,10 +148,11 @@ func setupCluster(a *App) {
 		}
 		// get hosts from body and store in hosts
 		decoder := json.NewDecoder(r.Body)
-		// hosts will be as follows: {hosts: []string}
+
 		var hostsReq struct {
-			Hosts []string
+			Hosts []Host
 		}
+
 		err := decoder.Decode(&hostsReq)
 		if err != nil {
 			fmt.Println("Error decoding hosts")
@@ -177,6 +160,16 @@ func setupCluster(a *App) {
 		}
 
 		a.hosts = hostsReq.Hosts
+		for _, host := range a.hosts {
+			if host.IsLeader {
+				a.leaderHost = host.Host
+			}
+		}
+
+		if a.leaderHost == a.selfAddress {
+			setIamTheLeader()
+		}
+
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Hosts received"))
 	})
@@ -187,9 +180,11 @@ func main() {
 	configs := ReadConfigFile()
 	port := configs["port"].(string)
 	cluster_mode := configs["cluster_mode"].(string)
+	host := configs["host"].(string)
 
 	app := NewApp()
 	app.clusterMode = false
+	app.selfAddress = host + ":" + port
 
 	if cluster_mode == "yes" {
 		app.clusterMode = true
