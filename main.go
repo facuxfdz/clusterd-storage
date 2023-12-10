@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -25,6 +26,7 @@ type App struct {
 	ready          bool
 	selfAddress    string
 	leaderHost     string
+	sharedValue    int
 }
 
 func CheckReadyMiddleware(handlerFunc http.HandlerFunc, app *App) http.HandlerFunc {
@@ -64,7 +66,8 @@ func NewApp() *App {
 				Name: "failed_requests",
 				Help: "Total number of failed requests",
 			}),
-		ready: false,
+		ready:       false,
+		sharedValue: -1,
 	}
 	prometheus.MustRegister(app.totalRequests)
 	prometheus.MustRegister(app.failedRequests)
@@ -78,7 +81,15 @@ func (a *App) handleRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Write([]byte("Hello, World!"))
+	type ReadResponse struct {
+		Response int
+	}
+	encoder := json.NewEncoder(w)
+	w.Header().Set("Content-Type", "application/json")
+	response := ReadResponse{
+		Response: a.sharedValue,
+	}
+	encoder.Encode(response)
 }
 
 func (a *App) handleWrite(w http.ResponseWriter, r *http.Request) {
@@ -89,13 +100,53 @@ func (a *App) handleWrite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !iamTheLeader() {
-		fmt.Println("Write request received but I am not the leader")
+		fmt.Println("Write request received but I am not the leader. Returning actual leader address")
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("I am not the leader"))
-		return
+		type LeaderResponse struct {
+			Leader   string
+			Response string
+		}
+		leaderResponse := LeaderResponse{
+			Leader:   a.leaderHost,
+			Response: "Bad request. I am not the leader.",
+		}
+		encoder := json.NewEncoder(w)
+		w.Header().Set("Content-Type", "application/json")
+		encoder.Encode(leaderResponse)
+
 	}
 
-	w.Write([]byte("Not implemented yet"))
+	decoder := json.NewDecoder(r.Body)
+	type WriteRequest struct {
+		Value int
+	}
+	var writeReq WriteRequest
+	err := decoder.Decode(&writeReq)
+	if err != nil {
+		fmt.Println("Error decoding write request")
+		fmt.Println(err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("Error decoding write request"))
+		return
+	}
+	a.sharedValue = writeReq.Value
+
+	for _, host := range a.hosts {
+		if host.Host == a.selfAddress {
+			continue
+		}
+		go func(host Host) {
+			fmt.Println("Sending write request to " + host.Host)
+
+			_, err := http.Post("http://"+host.Host+"/replicate", "application/json", strings.NewReader(fmt.Sprintf(`{"value": %v}`, writeReq.Value)))
+			if err != nil {
+				fmt.Println("Error sending write request to " + host.Host)
+				fmt.Println(err)
+				return
+			}
+			fmt.Println("Write request successfully sent to " + host.Host)
+		}(host)
+	}
 }
 
 func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +179,30 @@ func ReadConfigFile() map[string]interface{} {
 }
 
 func setupCluster(a *App) {
+
+	http.HandleFunc("/replicate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			w.Write([]byte("Only POST is allowed"))
+			return
+		}
+		time.Sleep(5 * time.Second) // simulate some work
+		decoder := json.NewDecoder(r.Body)
+		type WriteRequest struct {
+			Value int
+		}
+		var writeReq WriteRequest
+		err := decoder.Decode(&writeReq)
+		if err != nil {
+			fmt.Println("Error decoding write request")
+			fmt.Println(err)
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("Error decoding write request"))
+			return
+		}
+		fmt.Println("Replicating write request with value: " + fmt.Sprintf("%v", writeReq.Value) + " to self")
+		a.sharedValue = writeReq.Value
+	})
 
 	http.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
