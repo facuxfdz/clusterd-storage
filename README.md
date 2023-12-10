@@ -6,4 +6,5 @@ This is a simple clustered storage application which faces the problems of distr
 - [ ] Refactor. Remove unnecessary variables.
 
 ## Features/Improvements
-- [ ] Add a reference to the leader so that the follower can send the leader's address to the client
+- [x] Add a reference to the leader so that the follower can send the leader's address to the client
+- [ ] Implement the write operation. Replicating the data to the followers.
