@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -186,7 +185,6 @@ func setupCluster(a *App) {
 			w.Write([]byte("Only POST is allowed"))
 			return
 		}
-		time.Sleep(5 * time.Second) // simulate some work
 		decoder := json.NewDecoder(r.Body)
 		type WriteRequest struct {
 			Value int
